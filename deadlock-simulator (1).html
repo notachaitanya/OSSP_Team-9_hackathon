@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Deadlock Detection and Recovery Simulator</title>
+<style>
+:root{--bg:#fafaf8;--fg:#1c1c1a;--mut:#6b6b66;--card:#fff;--bd:#d9d9d3;--red:#d93025;--ok:#1e8e3e;--acc:#2563eb;--warn:#b26a00;--term:#0e1116;--tf:#cfe3cf;color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#14151a;--fg:#ececea;--mut:#9a9a94;--card:#1c1e24;--bd:#32343c;--red:#ff6b61;--ok:#5bd37c;--acc:#7aa2ff;--warn:#ffb54d;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#14151a;--fg:#ececea;--mut:#9a9a94;--card:#1c1e24;--bd:#32343c;--red:#ff6b61;--ok:#5bd37c;--acc:#7aa2ff;--warn:#ffb54d;color-scheme:dark}
+*{box-sizing:border-box}html,body{margin:0}body{background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;padding:16px}
+h1{font-size:20px;margin:0 0 2px}p.sub{margin:0 0 14px;color:var(--mut)}
+.wrap{display:flex;flex-wrap:wrap;gap:14px}.col{flex:1 1 380px;min-width:0}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:12px;margin-bottom:14px}
+.card h2{font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut);margin:0 0 8px}
+button{font:inherit;font-size:13px;padding:6px 10px;margin:0 6px 6px 0;border:1px solid var(--bd);background:var(--bg);color:var(--fg);border-radius:7px;cursor:pointer}
+button:hover{border-color:var(--acc)}button.go{background:var(--acc);color:#fff;border-color:var(--acc)}button.bad{border-color:var(--red);color:var(--red)}
+svg{width:100%;height:auto;display:block}svg text{pointer-events:none}
+#term{background:var(--term);color:var(--tf);border-radius:8px;font:13px/1.45 ui-monospace,Menlo,Consolas,monospace;padding:10px}
+#out{height:270px;overflow:auto;white-space:pre-wrap;word-break:break-word}
+.row{display:flex;gap:6px;margin-top:6px;align-items:center}.row span{color:#7fd48c}
+#in{flex:1;background:transparent;border:0;outline:0;color:var(--tf);font:inherit}
+.err{color:#ff7b72}.warn{color:#ffb54d}.ok{color:#7fd48c}.det{color:#79c0ff}
+.m{display:flex;gap:18px;flex-wrap:wrap}.m div{font-size:12px;color:var(--mut)}.m b{display:block;font-size:22px;color:var(--fg)}
+.badge{display:inline-block;padding:2px 9px;border-radius:99px;font-size:12px;border:1px solid var(--ok);color:var(--ok)}.badge.d{border-color:var(--red);color:var(--red)}
+</style></head><body>
+<h1>Deadlock Detection and Recovery Simulator</h1>
+<p class="sub">Load a scenario, run <code>detect</code>, then pick a recovery strategy. Everything works from the buttons or the terminal.</p>
+<div class="wrap">
+<div class="col">
+ <div class="card"><h2>Resource allocation graph <span id="badge" class="badge" style="float:right">no deadlock</span></h2>
+  <svg id="g" viewBox="0 0 640 340"></svg>
+  <div style="font-size:12px;color:var(--mut)">Circle = process, square = resource. Solid arrow resource→process means “held by”. Dashed arrow process→resource means “waiting for”. Red = deadlocked.</div></div>
+ <div class="card"><h2>Scenarios</h2>
+  <button onclick="run('preset classic')">Classic (2 procs)</button><button onclick="run('preset three')">3-process circle</button><button onclick="run('preset philosophers')">Dining philosophers</button><button onclick="run('preset multi')">Multi-instance</button><button class="go" onclick="run('demo')">▶ Run live demo</button><button onclick="run('reset')">Reset</button></div>
+ <div class="card"><h2>Detect and auto-recover</h2>
+  <button class="go" onclick="run('detect')">Detect</button>
+  <button class="bad" onclick="run('recover kill-all')">Kill all</button><button class="bad" onclick="run('recover kill-one')">Kill one at a time</button><button class="bad" onclick="run('recover preempt')">Preempt + rollback</button></div>
+ <div class="card"><h2>Resolve it yourself</h2><div style="font-size:13px;color:var(--mut);margin-bottom:8px">1. Run Detect. 2. Click a red process on the graph to choose your victim. 3. Choose what happens to it. Selected: <b id="sel">none</b></div>
+  <button class="bad" onclick="manual('kill')">Kill selected</button><button class="bad" onclick="manual('preempt')">Preempt selected (rollback)</button></div>
+ <div class="card"><h2>Last recovery metrics</h2><div class="m"><div><b id="mk">0</b>processes killed</div><div><b id="mr">0</b>rollbacks</div><div><b id="mn">0</b>detection rounds</div><div><b id="ml">0</b>resources freed</div></div></div>
+</div>
+<div class="col">
+ <div class="card"><h2>Terminal</h2><div id="term"><div id="out"></div><div class="row"><span>os-sim$</span><input id="in" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="command"></div></div></div>
+</div></div>
+<script>
+// ---------- state ----------
+// procs[name] = {held:{R:count}, wait:R or null, rb:rollbackCount}; res[name] = {total}
+let procs={}, res={}, dead=new Set(), ghosts=[], order=[], M={k:0,r:0,n:0,l:0};
+const out=document.getElementById('out');
+function say(t,c){const d=document.createElement('div');d.textContent=t;if(c)d.className=c;out.appendChild(d);out.scrollTop=out.scrollHeight}
+const heldSum=r=>Object.values(procs).reduce((a,p)=>a+(p.held[r]||0),0);
+const avail=r=>res[r].total-heldSum(r);
+const total=p=>Object.values(procs[p].held).reduce((a,b)=>a+b,0);
+
+// ---------- core operations ----------
+function request(p,r){
+  if(!procs[p]||!res[r])return say('unknown process or resource','err');
+  const P=procs[p]; if(P.wait)return say(p+' is already blocked','err');
+  if(avail(r)>0){P.held[r]=(P.held[r]||0)+1;say(`[GRANT] ${p} got ${r}`,'ok')}
+  else{P.wait=r;say(`[BLOCK] ${p} waits for ${r}`,'warn')}
+}
+function release(p,r){
+  const P=procs[p]; if(!P||!P.held[r])return say(p+' does not hold '+r,'err');
+  if(--P.held[r]===0)delete P.held[r];
+  say(`[FREE] ${p} released ${r}`,'ok'); grantWaiting();
+}
+function grantWaiting(){ // hand freed units to blocked processes
+  let moved=true;
+  while(moved){moved=false;for(const n in procs){const P=procs[n];
+    if(P.wait&&avail(P.wait)>0){P.held[P.wait]=(P.held[P.wait]||0)+1;say(`[GRANT] ${n} unblocked, got ${P.wait}`,'ok');P.wait=null;moved=true}}}
+}
+
+// ---------- detection (works for single and multiple instances) ----------
+// Idea: pretend processes finish one by one. A process can finish if it is not
+// waiting, or if what it waits for is currently available. When it finishes,
+// it gives back everything it holds. Whoever can never finish is deadlocked.
+function detect(quiet){
+  const work={}, fin={}; for(const r in res)work[r]=avail(r);
+  let ch=true;
+  while(ch){ch=false;for(const n in procs){if(fin[n])continue;const P=procs[n];
+    if(!P.wait||work[P.wait]>0){fin[n]=true;for(const r in P.held)work[r]+=P.held[r];ch=true}}}
+  dead=new Set(Object.keys(procs).filter(n=>!fin[n])); M.n++;
+  if(!quiet){
+    if(dead.size){say('[DETECT] DEADLOCK among: '+[...dead].join(', '),'err');
+      const cyc=findCycle(); if(cyc)say('[DETECT] cycle: '+cyc.join(' → '),'det')}
+    else say('[DETECT] system is safe, no deadlock','ok');
+  }
+  draw(); return dead.size>0;
+}
+function holders(r){return Object.keys(procs).filter(n=>procs[n].held[r])}
+function findCycle(){ // follow “waits for resource → held by process” until we repeat
+  for(const s of dead){const path=[s];let cur=s;
+    for(let i=0;i<20;i++){const w=procs[cur].wait;if(!w)break;
+      const nxt=holders(w).find(h=>dead.has(h)&&h!==cur)||holders(w)[0];if(!nxt)break;
+      path.push(w);path.push(nxt);cur=nxt;
+      const idx=path.indexOf(cur); if(idx>=0&&idx<path.length-1)return path.slice(idx)}}
+  return null;
+}
+
+// ---------- recovery ----------
+function candidates(){const d=[...dead];const h=d.filter(n=>total(n)>0);return h.length?h:d}
+function kill(n){const f=total(n);M.l+=f;delete procs[n];ghosts.push(n);M.k++;say(`[KILL] ${n} terminated, freed ${f} resource(s)`,'warn')}
+function rollback(n){ // take everything away, process restarts from scratch
+  const P=procs[n];M.l+=total(n);P.held={};P.wait=null;P.rb++;M.r++;
+  say(`[PREEMPT] ${n} rolled back (times: ${P.rb}), resources taken`,'warn')}
+// ---------- manual resolution: YOU pick the victim ----------
+let selP=null;
+function pick(n){selP=procs[n]?n:null;draw()}
+function manual(how){if(!selP||!procs[selP])return say('Click a process on the graph first.','err');run(how+' '+selP)}
+function manualAct(how,n){
+  if(!procs[n])return say('no such process: '+(n||''),'err');
+  if(!dead.size)detect(true);
+  if(!dead.has(n))say(`[WARN] ${n} is not part of the deadlock, proceeding anyway`,'warn');
+  if(how==='kill')kill(n);else rollback(n);
+  grantWaiting(); say('[DETECT] re-checking for deadlock...','det');
+  const still=detect(false); showM();
+  say(still?'[STILL DEADLOCKED] pick another victim':'[RESOLVED] you broke the deadlock', still?'err':'ok');
+  if(!still&&demoTick){const t=demoTick;demoTick=null;setTimeout(t,900)}
+}
+let recBusy=false, recId=0, demoTick=null;
+function recover(mode){ // animated: one visible step at a time
+  if(!['kill-all','kill-one','preempt'].includes(mode))return say('modes: kill-all | kill-one | preempt','err');
+  if(recBusy)return say('recovery already running','err');
+  if(!detect(true))return say('Nothing to recover: no deadlock right now.','ok');
+  recBusy=true; const rid=++recId; M={k:0,r:0,n:1,l:0}; say('[RECOVER] strategy = '+mode,'det'); showM();
+  const step=()=>{ if(rid!==recId)return;
+    if(!dead.size){say('[RECOVER] deadlock resolved','ok');showM();draw();recBusy=false;return}
+    if(mode==='kill-all'){say('[RECOVER] terminating every deadlocked process...','warn');[...dead].forEach(kill);grantWaiting()}
+    else if(mode==='kill-one'){const v=candidates().sort((a,b)=>total(b)-total(a))[0];
+      say(`[RECOVER] victim = ${v} (holds the most resources)`,'det');kill(v);grantWaiting()}
+    else{const v=candidates().sort((a,b)=>procs[a].rb-procs[b].rb||total(a)-total(b))[0];
+      say(`[RECOVER] victim = ${v} (fewest rollbacks, least work lost)`,'det');rollback(v);grantWaiting()}
+    draw();showM();
+    setTimeout(()=>{if(rid!==recId)return;say('[DETECT] re-checking for deadlock...','det');detect(true);showM();draw();setTimeout(step,1000)},1200);
+  };
+  setTimeout(step,800);
+}
+function recoverNow(mode){
+  if(!detect(true))return say('Nothing to recover: no deadlock right now.','ok');
+  M={k:0,r:0,n:1,l:0}; say('[RECOVER] strategy = '+mode,'det');
+  if(mode==='kill-all'){[...dead].forEach(kill);grantWaiting()}
+  else if(mode==='kill-one'){
+    while(dead.size){ // victim = holds the most resources (cheapest way to free the most)
+      const v=candidates().sort((a,b)=>total(b)-total(a))[0];kill(v);grantWaiting();detect(true)}}
+  else if(mode==='preempt'){
+    while(dead.size){ // victim = fewest rollbacks so far (starvation guard), then least work lost
+      const v=candidates().sort((a,b)=>procs[a].rb-procs[b].rb||total(a)-total(b))[0];
+      rollback(v);grantWaiting();detect(true)}}
+  else return say('modes: kill-all | kill-one | preempt','err');
+  detect(true);M.n=Math.max(M.n,1);
+  say(dead.size?'[RECOVER] still deadlocked!':'[RECOVER] deadlock resolved','ok'); showM(); draw();
+}
+function showM(){mk.textContent=M.k;mr.textContent=M.r;mn.textContent=M.n;ml.textContent=M.l}
+
+// ---------- scenarios ----------
+const PRE={
+ classic:['spawn P1 P2','res R1 R2','request P1 R1','request P2 R2','request P1 R2','request P2 R1'],
+ three:['spawn P1 P2 P3','res R1 R2 R3','request P1 R1','request P2 R2','request P3 R3','request P1 R2','request P2 R3','request P3 R1'],
+ philosophers:['spawn P1 P2 P3 P4','res R1 R2 R3 R4','request P1 R1','request P2 R2','request P3 R3','request P4 R4','request P1 R2','request P2 R3','request P3 R4','request P4 R1'],
+ multi:['spawn P1 P2 P3','res R1 2','res R2 1','request P1 R1','request P2 R1','request P3 R2','request P1 R2','request P3 R1']
+};
+
+// ---------- live demo (same story as the C program, played inside the page) ----------
+// 3 threads each hold their own lock and want the next one. A watchdog finds the
+// cycle, preempts one thread, the others finish, and the victim retries.
+let demoRun=0;
+function demo(){
+  exec('reset'); const id=++demoRun;
+  const at=(ms,fn)=>setTimeout(()=>{if(id===demoRun){fn();draw()}},ms);
+  const finish=n=>{say(`[${n}] got both locks, work done`,'ok');procs[n].done=1;
+    Object.keys(procs[n].held).forEach(r=>{while(procs[n]&&procs[n].held[r])release(n,r)})};
+  const tick=()=>{
+    const ns=Object.keys(procs);
+    const f=ns.find(n=>!procs[n].wait&&total(n)>=2);
+    if(f){finish(f);draw();return at(800,tick)}
+    const v=ns.find(n=>total(n)===0&&!procs[n].done);
+    if(v){procs[v].done=1;const i=+v.slice(1);say(`[${v}] retrying after rollback`,'warn');
+      request(v,'L'+i);request(v,'L'+((i+1)%3));return at(800,tick)}
+    detect(true);say('All threads finished: deadlock detected and recovered.','ok');
+  };
+  say('--- live demo: 3 threads, 3 mutexes ---','det');
+  exec('spawn T0 T1 T2'); exec('res L0 L1 L2');
+  [0,1,2].forEach(i=>at(700+i*500,()=>{request('T'+i,'L'+i);say(`[T${i}] holds L${i}, wants L${(i+1)%3}`)}));
+  at(2800,()=>[0,1,2].forEach(i=>request('T'+i,'L'+((i+1)%3))));
+  at(3800,()=>say('[WATCHDOG] scanning wait-for graph...','det'));
+  at(4500,()=>detect(false));
+  at(5600,()=>{demoTick=tick;say('[DEADLOCK] Your turn: click a red process on the graph, then press Kill or Preempt.','warn')});
+}
+
+// ---------- terminal ----------
+const HELP=`commands:
+ spawn P1 [P2 ...]        create processes
+ res R1 [n]               create a resource with n instances (default 1)
+ request P1 R1            process asks for a resource (blocks if none free)
+ release P1 R1            process gives a resource back
+ detect                   run deadlock detection
+ recover kill-all|kill-one|preempt
+ preset classic|three|philosophers|multi
+ demo                     auto-play: 3 threads deadlock, get detected, recover
+ kill P1 | preempt P1     YOU choose the victim (or click it on the graph)
+ ps | reset | clear | help`;
+function exec(line){
+  const a=line.trim().split(/\s+/);const c=a[0];if(!c)return;
+  if(c==='spawn')a.slice(1).forEach(n=>{if(procs[n])say(n+' exists','err');else{procs[n]={held:{},wait:null,rb:0};order.push(n);say('[SPAWN] '+n,'ok')}});
+  else if(c==='res'){if(a[2]&&/^\d+$/.test(a[2])&&+a[2]>0){res[a[1]]={total:+a[2]};say(`[RES] ${a[1]} x${a[2]}`,'ok')}
+    else a.slice(1).forEach(r=>{res[r]={total:1};say(`[RES] ${r} x1`,'ok')})}
+  else if(c==='request')request(a[1],a[2]);
+  else if(c==='release')release(a[1],a[2]);
+  else if(c==='detect')detect(false);
+  else if(c==='recover')recover(a[1]||'');
+  else if(c==='preset'){if(!PRE[a[1]])return say('presets: '+Object.keys(PRE).join(', '),'err');
+    exec('reset');say('--- loading '+a[1]+' ---','det');PRE[a[1]].forEach(exec)}
+  else if(c==='ps'){const ns=Object.keys(procs);if(!ns.length)say('(no processes)');
+    ns.forEach(n=>say(`${n}  holds: ${JSON.stringify(procs[n].held)}  waits: ${procs[n].wait||'-'}  ${dead.has(n)?'DEADLOCKED':''}`));
+    Object.keys(res).forEach(r=>say(`${r}  total ${res[r].total}, free ${avail(r)}`))}
+  else if(c==='kill'||c==='preempt')manualAct(c,a[1]);
+  else if(c==='demo')demo();
+  else if(c==='reset'){demoRun++;recId++;recBusy=false;demoTick=null;selP=null;procs={};res={};ghosts=[];order=[];dead=new Set();M={k:0,r:0,n:0,l:0};showM();say('[RESET]','warn')}
+  else if(c==='clear')out.textContent='';
+  else if(c==='help')say(HELP);
+  else say('unknown command: '+c+' (try help)','err');
+  if(c!=='detect'&&c!=='recover'&&c!=='clear'){dead=new Set([...dead].filter(n=>procs[n]));}
+  draw();
+}
+function run(cmd){say('os-sim$ '+cmd,'det');exec(cmd)}
+const inp=document.getElementById('in');let hist=[],hi=0;
+inp.addEventListener('keydown',e=>{
+  if(e.key==='Enter'){const v=inp.value;if(v.trim()){hist.push(v);hi=hist.length;run(v)}inp.value=''}
+  else if(e.key==='ArrowUp'&&hi>0){inp.value=hist[--hi]}
+  else if(e.key==='ArrowDown'){inp.value=hist[++hi]||'';hi=Math.min(hi,hist.length)}
+});
+
+// ---------- graph drawing (SVG) ----------
+function draw(){
+  const g=document.getElementById('g'),W=640,H=340,live=Object.keys(procs),pn=order.filter(n=>procs[n]||ghosts.includes(n)),rn=Object.keys(res);
+  const px=i=>W*(i+1)/(pn.length+1), rx=i=>W*(i+1)/(rn.length+1), py=70, ry=270;
+  let s=`<defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="var(--mut)"/></marker>
+  <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="var(--red)"/></marker></defs>`;
+  const P=n=>[px(pn.indexOf(n)),py], R=n=>[rx(rn.indexOf(n)),ry];
+  const edge=(x1,y1,x2,y2,dash,red,lbl)=>{ // shorten so arrowhead sits at the node edge
+    const dx=x2-x1,dy=y2-y1,L=Math.hypot(dx,dy)||1,k=30/L,ex=x2-dx*k,ey=y2-dy*k,sx=x1+dx*k,sy=y1+dy*k;
+    return `<line x1="${sx}" y1="${sy}" x2="${ex}" y2="${ey}" stroke="${red?'var(--red)':'var(--mut)'}" stroke-width="2" ${dash?'stroke-dasharray="6 5"':''} marker-end="url(#${red?'ar':'a'})"/>`+
+      (lbl>1?`<text x="${(sx+ex)/2+6}" y="${(sy+ey)/2}" font-size="12" fill="var(--fg)">x${lbl}</text>`:'')};
+  live.forEach(n=>{const p=procs[n];const [x,y]=P(n);
+    for(const r in p.held){if(!res[r])continue;const [rx2,ry2]=R(r);s+=edge(rx2,ry2,x,y,false,dead.has(n),p.held[r])}
+    if(p.wait){const [rx2,ry2]=R(p.wait);s+=edge(x,y,rx2,ry2,true,dead.has(n),0)}});
+  ghosts.forEach(n=>{const [x,y]=P(n);s+=`<circle cx="${x}" cy="${y}" r="26" fill="none" stroke="var(--mut)" stroke-width="2" stroke-dasharray="4 4"/><text x="${x}" y="${y+5}" text-anchor="middle" font-size="14" fill="var(--mut)">✕ ${n}</text><text x="${x}" y="${y+44}" text-anchor="middle" font-size="11" fill="var(--mut)">terminated</text>`});
+  live.forEach(n=>{const [x,y]=P(n),d=dead.has(n);
+    s+=`<circle onclick="pick('${n}')" style="cursor:pointer" cx="${x}" cy="${y}" r="26" fill="var(--card)" stroke="${d?'var(--red)':'var(--acc)'}" stroke-width="${n===selP?7:3}"/><text x="${x}" y="${y+5}" text-anchor="middle" font-size="15" font-weight="600" fill="var(--fg)">${n}</text>`});
+  rn.forEach(n=>{const [x,y]=R(n);
+    s+=`<rect x="${x-24}" y="${y-24}" width="48" height="48" rx="6" fill="var(--card)" stroke="var(--fg)" stroke-width="2"/><text x="${x}" y="${y+2}" text-anchor="middle" font-size="14" font-weight="600" fill="var(--fg)">${n}</text><text x="${x}" y="${y+17}" text-anchor="middle" font-size="11" fill="var(--mut)">${avail(n)}/${res[n].total} free</text>`});
+  if(!pn.length&&!rn.length)s+=`<text x="320" y="170" text-anchor="middle" fill="var(--mut)" font-size="15">Pick a scenario to begin</text>`;
+  g.innerHTML=s;
+  document.getElementById('sel').textContent=(selP&&procs[selP])?selP:'none';
+  const b=document.getElementById('badge');b.textContent=dead.size?'DEADLOCK: '+[...dead].join(', '):'no deadlock';b.className='badge'+(dead.size?' d':'');
+}
+say('Type help for commands, or press a scenario button.');draw();
+</script></body></html>
